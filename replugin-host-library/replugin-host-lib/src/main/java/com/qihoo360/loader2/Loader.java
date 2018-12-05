@@ -17,6 +17,7 @@
 package com.qihoo360.loader2;
 
 import android.content.Context;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ComponentInfo;
@@ -59,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static com.qihoo360.replugin.helper.LogDebug.LOADER_TAG;
 import static com.qihoo360.replugin.helper.LogDebug.LOG;
 import static com.qihoo360.replugin.helper.LogDebug.PLUGIN_TAG;
 import static com.qihoo360.replugin.helper.LogRelease.LOGR;
@@ -314,6 +316,18 @@ class Loader {
                     parent = getClass().getClassLoader().getParent(); // TODO: 这里直接用父类加载器
                 }
                 String soDir = mPackageInfo.applicationInfo.nativeLibraryDir;
+
+                long begin = 0;
+                boolean isDexExist = false;
+
+                if (LOG) {
+                    begin = System.currentTimeMillis();
+                    File dexFile = mPluginObj.mInfo.getDexFile();
+                    if (dexFile.exists() && dexFile.length() > 0) {
+                        isDexExist = true;
+                    }
+                }
+
                 mClassLoader = RePlugin.getConfig().getCallbacks().createPluginClassLoader(mPluginObj.mInfo, mPath, out, soDir, parent);
                 Log.i("dex", "load " + mPath + " = " + mClassLoader);
 
@@ -322,6 +336,18 @@ class Loader {
                         LogDebug.d(PLUGIN_TAG, "get dex null");
                     }
                     return false;
+                }
+
+                if (LOG) {
+                    if (!isDexExist) {
+                        Log.d(LOADER_TAG, " --释放DEX, " + "(plugin=" + mPluginName + ", version=" + mPluginObj.mInfo.getVersion() + ")"
+                                + ", use:" + (System.currentTimeMillis() - begin)
+                                + ", process:" + IPC.getCurrentProcessName());
+                    } else {
+                        Log.d(LOADER_TAG, " --无需释放DEX, " + "(plugin=" + mPluginName + ", version=" + mPluginObj.mInfo.getVersion() + ")"
+                                + ", use:" + (System.currentTimeMillis() - begin)
+                                + ", process:" + IPC.getCurrentProcessName());
+                    }
                 }
 
                 // 缓存表：ClassLoader
@@ -357,12 +383,18 @@ class Loader {
     private void regReceivers() throws android.os.RemoteException {
         String plugin = mPluginObj.mInfo.getName();
 
+        Map<String, List<IntentFilter>> map = ManifestParser.INS.getReceiverFilterMap(plugin);
+
+        if (map == null || map.size() == 0) {
+            return;
+        }
+
         if (mPluginHost == null) {
             mPluginHost = getPluginHost();
         }
 
         if (mPluginHost != null) {
-            mPluginHost.regReceiver(plugin, ManifestParser.INS.getReceiverFilterMap(plugin));
+            mPluginHost.regReceiver(plugin, map);
         }
     }
 
@@ -601,7 +633,11 @@ class Loader {
     private void adjustPluginProcess(ApplicationInfo appInfo) {
         HashMap<String, String> processMap = getConfigProcessMap(appInfo);
         if (processMap == null || processMap.isEmpty()) {
-            processMap = genDynamicProcessMap();
+
+            PluginInfo pi = MP.getPlugin(mPluginName, false);
+            if (pi != null && pi.getFrameworkVersion() >= 4) {
+                processMap = genDynamicProcessMap();
+            }
         }
 
         if (LOG) {

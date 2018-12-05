@@ -25,6 +25,7 @@ import android.content.IntentFilter;
 import android.content.pm.ProviderInfo;
 import android.content.pm.ServiceInfo;
 import android.os.IBinder;
+import android.os.Parcelable;
 import android.os.RemoteException;
 import android.support.v4.content.LocalBroadcastManager;
 import android.text.TextUtils;
@@ -173,6 +174,34 @@ class PmBase {
     private static final byte[] LOCKER = new byte[0];
 
     /**
+     * 广播接收器，声明为成员变量以避免重复创建
+     */
+    private BroadcastReceiver mBroadcastReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            String action = intent.getAction();
+            if (TextUtils.isEmpty(action)) {
+                return;
+            }
+
+            if (action.equals(intent.getAction())) {
+                PluginInfo info = intent.getParcelableExtra("obj");
+                if (info != null) {
+                    switch (action) {
+                        case ACTION_NEW_PLUGIN:
+                            // 非常驻进程上下文
+                            newPluginFound(info, intent.getBooleanExtra(RePluginConstants.KEY_PERSIST_NEED_RESTART, false));
+                            break;
+                        case ACTION_UNINSTALL_PLUGIN:
+                            pluginUninstalled(info);
+                            break;
+                    }
+                }
+            }
+        }
+    };
+
+    /**
      * 类映射
      */
     private static class DynamicClass {
@@ -229,6 +258,9 @@ class PmBase {
     }
 
     void init() {
+
+        RePlugin.getConfig().getCallbacks().initPnPluginOverride();
+
         if (HostConfigHelper.PERSISTENT_ENABLE) {
             // （默认）“常驻进程”作为插件管理进程，则常驻进程作为Server，其余进程作为Client
             if (IPC.isPersistentProcess()) {
@@ -276,7 +308,7 @@ class PmBase {
 
         mHostSvc = new PmHostSvc(mContext, this);
         PluginProcessMain.installHost(mHostSvc);
-        PluginProcessMain.schedulePluginProcessLoop(PluginProcessMain.CHECK_STAGE1_DELAY);
+        StubProcessManager.schedulePluginProcessLoop(StubProcessManager.CHECK_STAGE1_DELAY);
 
         // 兼容即将废弃的p-n方案 by Jiongxuan Zhang
         mAll = new Builder.PxAll();
@@ -381,12 +413,47 @@ class PmBase {
         }
     }
 
+    /**
+     * 把插件Add到插件列表
+     *
+     * @param info   待add插件的PluginInfo对象
+     * @param plugin 待add插件的Plugin对象
+     */
     private void putPluginObject(PluginInfo info, Plugin plugin) {
-        // 同时加入PackageName和Alias（如有）
-        mPlugins.put(info.getPackageName(), plugin);
-        if (!TextUtils.isEmpty(info.getAlias())) {
-            // 即便Alias和包名相同也可以再Put一次，反正只是覆盖了相同Value而已
-            mPlugins.put(info.getAlias(), plugin);
+        if (mPlugins.containsKey(info.getAlias()) || mPlugins.containsKey(info.getPackageName())) {
+            if (LOG) {
+                LogDebug.d(PLUGIN_TAG, "当前内置插件列表中已经有" + info.getName() + "，需要看看谁的版本号大。");
+            }
+
+            // 找到已经存在的
+            Plugin existedPlugin = mPlugins.get(info.getPackageName());
+            if (existedPlugin == null) {
+                existedPlugin = mPlugins.get(info.getAlias());
+            }
+
+            if (existedPlugin.mInfo.getVersion() < info.getVersion()) {
+                if (LOG) {
+                    LogDebug.d(PLUGIN_TAG, "新传入的纯APK插件, name=" + info.getName() + ", 版本号比较大,ver=" + info.getVersion() + ",以TA为准。");
+                }
+
+                // 同时加入PackageName和Alias（如有）
+                mPlugins.put(info.getPackageName(), plugin);
+                if (!TextUtils.isEmpty(info.getAlias())) {
+                    // 即便Alias和包名相同也可以再Put一次，反正只是覆盖了相同Value而已
+                    mPlugins.put(info.getAlias(), plugin);
+                }
+            } else {
+                if (LOG) {
+                    LogDebug.d(PLUGIN_TAG, "新传入的纯APK插件" + info.getName() + "版本号还没有内置的大，什么都不做。");
+                }
+            }
+        } else {
+            // 同时加入PackageName和Alias（如有）
+            mPlugins.put(info.getPackageName(), plugin);
+            if (!TextUtils.isEmpty(info.getAlias())) {
+                // 即便Alias和包名相同也可以再Put一次，反正只是覆盖了相同Value而已
+                mPlugins.put(info.getAlias(), plugin);
+            }
         }
     }
 
@@ -580,36 +647,17 @@ class PmBase {
 
         if (!IPC.isPersistentProcess()) {
             // 由于常驻进程已经在内部做了相关的处理，此处仅需要在UI进程注册并更新即可
-            registerReceiverAction(ACTION_NEW_PLUGIN);
-            registerReceiverAction(ACTION_UNINSTALL_PLUGIN);
-        }
-    }
-
-    /**
-     * @param action
-     */
-    private final void registerReceiverAction(final String action) {
-        IntentFilter filter = new IntentFilter(action);
-        LocalBroadcastManager.getInstance(mContext).registerReceiver(new BroadcastReceiver() {
-
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                if (action.equals(intent.getAction())) {
-                    PluginInfo info = intent.getParcelableExtra("obj");
-                    if (info != null) {
-                        switch (action) {
-                            case ACTION_NEW_PLUGIN:
-                                // 非常驻进程上下文
-                                newPluginFound(info, intent.getBooleanExtra(RePluginConstants.KEY_PERSIST_NEED_RESTART, false));
-                                break;
-                            case ACTION_UNINSTALL_PLUGIN:
-                                pluginUninstalled(info);
-                                break;
-                        }
-                    }
+            IntentFilter intentFilter = new IntentFilter();
+            intentFilter.addAction(ACTION_NEW_PLUGIN);
+            intentFilter.addAction(ACTION_UNINSTALL_PLUGIN);
+            try {
+                LocalBroadcastManager.getInstance(mContext).registerReceiver(mBroadcastReceiver, intentFilter);
+            } catch (Exception e) {
+                if (LOGR) {
+                    LogRelease.e(PLUGIN_TAG, "p m hlc a r e: " + e.getMessage(), e);
                 }
             }
-        }, filter);
+        }
     }
 
     /**
@@ -1133,7 +1181,7 @@ class PmBase {
 
         // 通知本进程：通知给外部使用者
         Intent intent = new Intent(RePluginConstants.ACTION_NEW_PLUGIN);
-        intent.putExtra(RePluginConstants.KEY_PLUGIN_INFO, info);
+        intent.putExtra(RePluginConstants.KEY_PLUGIN_INFO, (Parcelable) info);
         intent.putExtra(RePluginConstants.KEY_PERSIST_NEED_RESTART, persistNeedRestart);
         intent.putExtra(RePluginConstants.KEY_SELF_NEED_RESTART, mNeedRestart);
         LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
@@ -1176,7 +1224,7 @@ class PmBase {
         }
 
         //
-        PluginProcessMain.schedulePluginProcessLoop(PluginProcessMain.CHECK_STAGE1_DELAY);
+        StubProcessManager.schedulePluginProcessLoop(StubProcessManager.CHECK_STAGE1_DELAY);
 
         // 获取
         IPluginClient client = PluginProcessMain.probePluginClient(plugin, process, info);
@@ -1199,7 +1247,7 @@ class PmBase {
                 LogRelease.e(PLUGIN_TAG, "a.p.p: " + e.getMessage(), e);
             }
         }
-        // 分配的坑位不属于UI、和自定义进程，就返回。
+        // 分配的坑位不属于UI、自定义进程或Stub坑位进程，就返回。（没找到有效进程）
         if (!(index == IPluginManager.PROCESS_UI
                 || PluginProcessHost.isCustomPluginProcess(index)
                 || PluginManager.isPluginProcess(index))) {

@@ -29,7 +29,6 @@ import android.os.Parcelable;
 import android.support.annotation.NonNull;
 import android.text.TextUtils;
 
-import com.qihoo360.loader2.BuildCompat;
 import com.qihoo360.loader2.Constant;
 import com.qihoo360.loader2.PluginNativeLibsHelper;
 import com.qihoo360.loader2.V5FileInfo;
@@ -43,7 +42,13 @@ import com.qihoo360.replugin.utils.FileUtils;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.regex.MatchResult;
@@ -60,7 +65,9 @@ import static com.qihoo360.replugin.helper.LogDebug.PLUGIN_TAG;
  * @author RePlugin Team
  */
 
-public class PluginInfo implements Parcelable, Cloneable {
+public class PluginInfo implements Serializable, Parcelable, Cloneable {
+
+    private static final long serialVersionUID = -6531475023210445876L;
 
     private static final String TAG = "PluginInfo";
 
@@ -102,7 +109,8 @@ public class PluginInfo implements Parcelable, Cloneable {
      */
     public static final int FRAMEWORK_VERSION_UNKNOWN = 0;
 
-    private JSONObject mJson;
+    private transient JSONObject mJson;
+    private String mJsonText;
 
     // 若插件需要更新，则会有此值
     private PluginInfo mPendingUpdate;
@@ -150,28 +158,6 @@ public class PluginInfo implements Parcelable, Cloneable {
         setVersion(version);
         setPath(path);
         setType(type);
-    }
-
-    /**
-     * 将PluginInfo对象应用到此对象中（克隆）
-     *
-     * @param pi PluginInfo对象
-     */
-    public PluginInfo(PluginInfo pi) {
-        this.mJson = JSONHelper.cloneNoThrows(pi.mJson);
-        if (pi.mPendingUpdate != null) {
-            this.mPendingUpdate = new PluginInfo(pi.mPendingUpdate);
-        }
-        if (pi.mPendingDelete != null) {
-            this.mPendingDelete = new PluginInfo(pi.mPendingDelete);
-        }
-        this.mIsPendingCover = pi.mIsPendingCover;
-        if (pi.mPendingCover != null) {
-            this.mPendingCover = new PluginInfo(pi.mPendingCover);
-        }
-        if (pi.mParentInfo != null) {
-            this.mParentInfo = new PluginInfo(pi.mParentInfo);
-        }
     }
 
     private void initPluginInfo(JSONObject jo) {
@@ -463,7 +449,7 @@ public class PluginInfo implements Parcelable, Cloneable {
         Context context = RePluginInternal.getAppContext();
 
         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.N_MR1) {
-            return new File(getApkDir() + File.separator + "oat" + File.separator + getArtOatCpuType());
+            return new File(getApkDir() + File.separator + "oat" + File.separator + VMRuntimeCompat.getArtOatCpuType());
         } else {
             if (isPnPlugin()) {
                 return context.getDir(Constant.LOCAL_PLUGIN_ODEX_SUB_DIR, 0);
@@ -497,16 +483,6 @@ public class PluginInfo implements Parcelable, Cloneable {
             File dir = getDexParentDir();
             return new File(dir, makeInstalledFileName() + ".dex");
         }
-    }
-
-    /**
-     * Art虚拟机，引入AOT编译后，读取oat目录下，当前正在使用的目录
-     * TODO 目前仅支持arm
-     *
-     * @return
-     */
-    private String getArtOatCpuType() {
-        return VMRuntimeCompat.is64Bit() ? BuildCompat.ARM64 : BuildCompat.ARM;
     }
 
     /**
@@ -810,7 +786,7 @@ public class PluginInfo implements Parcelable, Cloneable {
     // Parcelable and Cloneable
     // -------------------------
 
-    public static final Parcelable.Creator<PluginInfo> CREATOR = new Parcelable.Creator<PluginInfo>() {
+    public static final Creator<PluginInfo> CREATOR = new Creator<PluginInfo>() {
 
         @Override
         public PluginInfo createFromParcel(Parcel source) {
@@ -840,7 +816,50 @@ public class PluginInfo implements Parcelable, Cloneable {
 
     @Override
     public Object clone() {
-        return new PluginInfo(this);
+        PluginInfo pluginInfo = null;
+
+        // 通过 transient 和 Serializable 配合实现深拷贝
+        this.mJsonText = this.mJson != null ? this.mJson.toString() : null;
+
+        // Object -> Stream -> clone Object
+        try {
+            ByteArrayOutputStream byteArrOut = new ByteArrayOutputStream();
+            ObjectOutputStream objOut = new ObjectOutputStream(byteArrOut);
+
+            objOut.writeObject(this);
+
+            ByteArrayInputStream byteArrIn = new ByteArrayInputStream(byteArrOut.toByteArray());
+            ObjectInputStream objIn = new ObjectInputStream(byteArrIn);
+
+            pluginInfo = (PluginInfo) objIn.readObject();
+
+            if (pluginInfo != null && !TextUtils.isEmpty(this.mJsonText)) {
+                pluginInfo.mJson = new JSONObject(this.mJsonText);
+
+                JSONObject ujo = pluginInfo.mJson.optJSONObject("upinfo");
+                if (ujo != null) {
+                    pluginInfo.mPendingUpdate = new PluginInfo(ujo);
+                }
+
+                JSONObject djo = pluginInfo.mJson.optJSONObject("delinfo");
+                if (djo != null) {
+                    pluginInfo.mPendingDelete = new PluginInfo(djo);
+                }
+
+                JSONObject cjo = pluginInfo.mJson.optJSONObject("coverinfo");
+                if (cjo != null) {
+                    pluginInfo.mPendingCover = new PluginInfo(cjo);
+                }
+            }
+        } catch (ClassNotFoundException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+
+        return pluginInfo;
     }
 
     @Override
@@ -855,13 +874,15 @@ public class PluginInfo implements Parcelable, Cloneable {
 
     @Override
     public String toString() {
-        StringBuilder b = new StringBuilder();
+        synchronized (this) {
+            StringBuilder b = new StringBuilder();
 
-        b.append("PInfo { ");
-        toContentString(b);
-        b.append(" }");
+            b.append("PInfo { ");
+            toContentString(b);
+            b.append(" }");
 
-        return b.toString();
+            return b.toString();
+        }
     }
 
     private void toContentString(StringBuilder b) {
@@ -939,7 +960,7 @@ public class PluginInfo implements Parcelable, Cloneable {
         PluginInfo pluginInfo = (PluginInfo) obj;
 
         try {
-            return pluginInfo.mJson.equals(mJson);
+            return pluginInfo.mJson.toString().equals(mJson.toString());
         } catch (Exception e) {
             return false;
         }

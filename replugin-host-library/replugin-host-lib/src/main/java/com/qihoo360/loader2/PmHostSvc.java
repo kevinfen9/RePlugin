@@ -23,6 +23,7 @@ import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.os.Binder;
 import android.os.IBinder;
+import android.os.Parcelable;
 import android.os.RemoteException;
 import android.support.v4.content.LocalBroadcastManager;
 import android.text.TextUtils;
@@ -176,9 +177,7 @@ class PmHostSvc extends IPluginHost.Stub {
 
     @Override
     public IPluginClient startPluginProcess(String plugin, int process, PluginBinderInfo info) throws RemoteException {
-        synchronized (this) {
-            return mPluginMgr.startPluginProcessLocked(plugin, process, info);
-        }
+        return mPluginMgr.startPluginProcessLocked(plugin, process, info);
     }
 
     @Override
@@ -253,6 +252,10 @@ class PmHostSvc extends IPluginHost.Stub {
     public void regReceiver(String plugin, Map rcvFilMap) throws RemoteException {
         PluginInfo pi = MP.getPlugin(plugin, false);
         if (pi == null || pi.getFrameworkVersion() < 4) {
+            return;
+        }
+
+        if (rcvFilMap == null) {
             return;
         }
 
@@ -335,7 +338,6 @@ class PmHostSvc extends IPluginHost.Stub {
             syncInstalledPluginInfo2All(pi);
 
         }
-
         return pi;
     }
 
@@ -378,7 +380,7 @@ class PmHostSvc extends IPluginHost.Stub {
         // 通知其它进程去更新
         Intent intent = new Intent(PmBase.ACTION_NEW_PLUGIN);
         intent.putExtra(RePluginConstants.KEY_PERSIST_NEED_RESTART, mNeedRestart);
-        intent.putExtra("obj", needToSyncPi);
+        intent.putExtra("obj", (Parcelable) needToSyncPi);
         IPC.sendLocalBroadcast2AllSync(mContext, intent);
 
         if (LOG) {
@@ -394,7 +396,7 @@ class PmHostSvc extends IPluginHost.Stub {
 
         // 给各进程发送广播，同步更新
         final Intent intent = new Intent(PluginInfoUpdater.ACTION_UNINSTALL_PLUGIN);
-        intent.putExtra("obj", pi);
+        intent.putExtra("obj", (Parcelable) pi);
         // 注意：若在attachBaseContext中调用此方法，则由于此时getApplicationContext为空，导致发送广播时会出现空指针异常。
         // 则应该Post一下，待getApplicationContext有值后再发送广播。
         if (RePluginInternal.getAppContext().getApplicationContext() != null) {
@@ -459,7 +461,7 @@ class PmHostSvc extends IPluginHost.Stub {
         // 通知其它进程
         Intent intent = new Intent(PmBase.ACTION_NEW_PLUGIN);
         intent.putExtra(RePluginConstants.KEY_PERSIST_NEED_RESTART, mNeedRestart);
-        intent.putExtra("obj", info);
+        intent.putExtra("obj", (Parcelable) info);
         IPC.sendLocalBroadcast2AllSync(mContext, intent);
 
         return true;
@@ -479,26 +481,25 @@ class PmHostSvc extends IPluginHost.Stub {
         if (LOG) {
             LogDebug.d(PLUGIN_TAG, "sendIntent2Process target=" + target + " intent=" + intent);
         }
-
         if (TextUtils.equals(target, IPC.getPluginHostProcessName())) {
-            intent.setExtrasClassLoader(getClass().getClassLoader());
-            if (sync) {
-                LocalBroadcastHelper.sendBroadcastSyncUi(mContext, intent);
-            } else {
-                LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
-            }
+            sendIntent2PluginHostProcess(intent, sync);
             return;
         }
 
         if (TextUtils.isEmpty(target)) {
-            intent.setExtrasClassLoader(getClass().getClassLoader());
-            if (sync) {
-                LocalBroadcastHelper.sendBroadcastSyncUi(mContext, intent);
-            } else {
-                LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
-            }
+            sendIntent2PluginHostProcess(intent, sync);
         }
+
         PluginProcessMain.sendIntent2Process(target, intent, sync);
+    }
+
+    private void sendIntent2PluginHostProcess(Intent intent, boolean sync) {
+        intent.setExtrasClassLoader(getClass().getClassLoader());
+        if (sync) {
+            LocalBroadcastHelper.sendBroadcastSyncUi(mContext, intent);
+        } else {
+            LocalBroadcastManager.getInstance(mContext).sendBroadcast(intent);
+        }
     }
 
     @Override
